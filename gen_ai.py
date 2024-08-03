@@ -1,165 +1,107 @@
-import streamlit as st
-from openai import OpenAI
-from pypdf import PdfReader
-from docx import Document
-import docx2txt
-import tempfile
-from dotenv import load_dotenv, find_dotenv
 import os
+import openai
+import streamlit as st
+from dotenv import load_dotenv, find_dotenv
+import pandas as pd
+import PyPDF2
+from io import StringIO
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.embeddings.openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
 
-# Load environment variables from .env file
-load_dotenv(find_dotenv())
-
-# Display the banner image
-st.image("imagebanner.png", use_column_width=True)
-
-# Initialize OpenAI client
+# Load OpenAI API key
+load_dotenv(find_dotenv(), override=True)
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+api_key = os.getenv("OPENAI_API_KEY")
+openai.api_key = api_key
 
 # Initialize session state for chat history
 if "chat_history" not in st.session_state:
-    st.session_state["chat_history"] = ""
+    st.session_state.chat_history = []
 
+# Display the banner image
+st.image("imagebanner2.png", use_column_width=True)
 
-# Function to extract text from PDF
-def extract_text_from_pdf(file):
-    pdf_reader = PdfReader(file)
-    text = ""
-    for page in pdf_reader.pages:
-        text += page.extract_text()
-    return text
-
-
-# Function to extract text from DOCX
-def extract_text_from_docx(file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
-        temp_file.write(file.read())
-        temp_file_path = temp_file.name
-    text = docx2txt.process(temp_file_path)
-    return text
-
-
-# Function to handle file upload and text extraction
-def handle_file(uploaded_files):
-    extracted_text = ""
+# Function to load and read multiple files (PDF, TXT, XLSX)
+def load_files(uploaded_files):
+    all_texts = []
     for uploaded_file in uploaded_files:
         if uploaded_file.type == "application/pdf":
-            extracted_text += extract_text_from_pdf(uploaded_file)
+            reader = PyPDF2.PdfFileReader(uploaded_file)
+            text = ""
+            for page_num in range(reader.numPages):
+                page = reader.getPage(page_num)
+                text += page.extract_text()
+            all_texts.append(text)
         elif uploaded_file.type == "text/plain":
-            extracted_text += str(uploaded_file.read(), "utf-8")
-    return extracted_text
+            text = StringIO(uploaded_file.getvalue().decode("utf-8")).read()
+            all_texts.append(text)
+        elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            xls = pd.ExcelFile(uploaded_file)
+            for sheet_name in xls.sheet_names:
+                sheet = pd.read_excel(xls, sheet_name)
+                text = sheet.to_string()
+                all_texts.append(text)
+    return all_texts
 
+# Function to break content into chunks
+def break_into_chunks(text, chunk_size=1000, overlap=200):
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=overlap)
+    chunks = text_splitter.split_text(text)
+    return chunks
 
-# Function to summarize text if it's too long
-def summarize_text(text, max_length=500):
-    if len(text) > max_length:
-        summary_prompt = f"Summarize the following text to be under {max_length} characters:\n{text}"
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": summary_prompt}
-            ]
-        )
-        summary = response.choices[0].message.content
-        return summary
-    else:
-        return text
+# Initialize FAISS index with embeddings
+def initialize_faiss_index(chunks):
+    embeddings = OpenAIEmbeddings()
+    texts = [chunk for chunk in chunks]
+    vectorstore = FAISS.from_texts(texts, embeddings)
+    return vectorstore
 
-
-# Sidebar for file uploads and extracted text display
-st.sidebar.header("Upload Files")
-uploaded_files = st.sidebar.file_uploader("Choose files", accept_multiple_files=True, type=['pdf', 'docx', 'txt'])
-
-extracted_text = handle_file(uploaded_files) if uploaded_files else ""
-clear_button = st.sidebar.button("Clear Extracted Text")
-
-if clear_button:
-    extracted_text = ""
-
-st.sidebar.text_area("Extracted Text", extracted_text, height=200)
-
-# Tabs for different functionalities
-tab1, tab2, tab3 = st.tabs(["Conversational Brand Expert", "Scoring Tab", "Generate Image"])
-
-with tab1:
-    st.header("Conversational Brand Expert")
-    user_prompt = st.text_input("User Prompt")
-    chat_history = st.session_state["chat_history"]
-    if st.button("Generate Response"):
-        # Include extracted text in the system message
-        system_message = f"You are a helpful assistant. Here is the text from the uploaded documents: {extracted_text}"
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+# Chat with the assistant using OpenAI API
+def chat_with_assistant(prompt, system_message):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
             messages=[
                 {"role": "system", "content": system_message},
-                {"role": "user", "content": user_prompt}
-            ]
+                {"role": "user", "content": prompt},
+            ],
         )
-        assistant_response = response.choices[0].message.content
-        chat_history += f"User: {user_prompt}\nAI: {assistant_response}\n\n"
-        st.session_state["chat_history"] = chat_history
-    st.text_area("Chat History", chat_history, height=200, key="chat_history")
+        message = response.choices[0].message.content
+        return message
+    except Exception as e:
+        st.error(f"Error: {e}")
+        return None
 
-with tab2:
-    st.header("Scoring Tab")
+# Streamlit app logic
+st.title("Math Magic: Your Math Problem Solver")
+uploaded_files = st.file_uploader("Upload files", accept_multiple_files=True, type=['pdf', 'txt', 'xlsx'])
 
-    if st.button("Score Text"):
-        scoring_prompt = (
-                "Score the following text based on the provided brand voice guidelines. "
-                "Give a score from 1 to 10 for each parameter: Clarity, Consistency, Tone, Personality, Point of View.\n" + extracted_text
-        )
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": scoring_prompt}
-            ]
-        )
-        scores = response.choices[0].message.content.split("\n")
-        scores_dict = {param.split(":")[0].strip(): param.split(":")[1].strip() for param in scores if ":" in param}
+if uploaded_files:
+    texts = load_files(uploaded_files)
+    all_chunks = []
+    for text in texts:
+        chunks = break_into_chunks(text)
+        all_chunks.extend(chunks)
+    vectorstore = initialize_faiss_index(all_chunks)
+    st.write("Files processed and vector store created.")
 
-        # Display scores in a table
-        st.write("## Scores Table")
-        st.table(scores_dict)
+# Function to solve math problems using GPT-4
+def solve_math_problem(prompt):
+    system_message = "You are a math tutor who can solve complex math problems by explaining concepts and providing good explanations for students from classes 7 to 12. Include an explanation of the concept behind solving the problem."
+    return chat_with_assistant(prompt, system_message)
 
-        # Calculate and display overall score
-        numeric_scores = [float(score) for score in scores_dict.values() if score.strip().isdigit()]
-        if numeric_scores:
-            overall_score = sum(numeric_scores) / len(numeric_scores)
-            st.write(f"## Overall Score: {overall_score}")
-
-        # Display explanations
-        st.write("## Explanations")
-        for param, score in scores_dict.items():
-            explanation_prompt = f"Explain the score for {param} based on the provided brand voice guidelines and the text:\n{extracted_text}"
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": explanation_prompt}
-                ]
-            )
-            explanation = response.choices[0].message.content
-            st.write(f"### {param} Explanation")
-            st.write(explanation)
-
-with tab3:
-    st.header("Generate Brand Image")
-    image_prompt = st.text_input("Enter image generation prompt:", key='image_prompt')
-    if st.button("Generate Image"):
-        if extracted_text:
-            summarized_text = summarize_text(extracted_text)
-            combined_prompt = f"Based on the following extracted text, {summarized_text}, generate an image: {image_prompt}"
-        else:
-            combined_prompt = image_prompt
-
-        response = client.images.generate(
-            model="dall-e-3",
-            prompt=combined_prompt,
-            size="1024x1024",
-            n=1
-        )
-        image_url = response.data[0].url
-        st.image(image_url, caption="Generated Image")
+# Prompt for math problem
+prompt = st.text_area("Enter your math problem here:")
+if st.button("Solve"):
+    if prompt:
+        solution = solve_math_problem(prompt)
+        if solution:
+            st.write(f"Tutor: {solution}")
+            # Add to chat history
+            st.session_state.chat_history.append({"user": prompt, "tutor": solution})
+            # Display chat history
+            for entry in st.session_state.chat_history:
+                st.write(f"Student: {entry['user']}")
+                st.write(f"Tutor: {entry['tutor']}")
+                st.write("-" * 30)
