@@ -11,9 +11,11 @@ from langchain_community.vectorstores import FAISS
 
 # Load OpenAI API key
 load_dotenv(find_dotenv(), override=True)
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 api_key = os.getenv("OPENAI_API_KEY")
-openai.api_key = api_key
+
+# Initialize OpenAI client
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+client = openai.OpenAI(api_key=api_key)
 
 # Initialize session state for chat history
 if "chat_history" not in st.session_state:
@@ -60,7 +62,7 @@ def initialize_faiss_index(chunks):
 # Chat with the assistant using OpenAI API
 def chat_with_assistant(prompt, system_message):
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": system_message},
