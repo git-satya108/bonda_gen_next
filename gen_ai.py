@@ -1,6 +1,7 @@
 import streamlit as st
 from openai import OpenAI
 from pypdf import PdfReader
+from docx import Document
 import docx2txt
 import tempfile
 from dotenv import load_dotenv, find_dotenv
@@ -45,8 +46,6 @@ def handle_file(uploaded_files):
     for uploaded_file in uploaded_files:
         if uploaded_file.type == "application/pdf":
             extracted_text += extract_text_from_pdf(uploaded_file)
-        elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            extracted_text += extract_text_from_docx(uploaded_file)
         elif uploaded_file.type == "text/plain":
             extracted_text += str(uploaded_file.read(), "utf-8")
     return extracted_text
